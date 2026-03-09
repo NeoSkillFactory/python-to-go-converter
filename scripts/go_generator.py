@@ -35,8 +35,28 @@ class GoGenerator:
         self.output_lines: List[str] = []
         self.indent_level = 0
         self.known_vars: Dict[str, str] = {}  # variable name -> Go type (for current scope)
+        self.in_method = False
+
+    def _scan_for_print(self, stmts):
+        """Check if any statement uses print (needs fmt import)."""
+        for stmt in stmts:
+            if stmt.get('type') == 'expr':
+                val = stmt.get('value', {})
+                if val.get('type') == 'call':
+                    func = val.get('func', {})
+                    if func.get('type') == 'name' and func.get('id') == 'print':
+                        return True
+            for key in ('body', 'orelse'):
+                sub = stmt.get(key, [])
+                if isinstance(sub, list) and self._scan_for_print(sub):
+                    return True
+        return False
 
     def generate(self) -> str:
+        # Auto-add fmt import if print is used
+        if self._scan_for_print(self.ir) and "fmt" not in self.required_imports:
+            self.required_imports = set(self.required_imports) | {"fmt"}
+
         # Start with package declaration: default "package main"
         self.output_lines.append("package main")
         self.output_lines.append("")
@@ -122,8 +142,7 @@ class GoGenerator:
         if returns:
             ret_type = self._expr_to_go_type(returns)
             sig += f" {ret_type}"
-        self._write_line(sig)
-        self._write_line("{")
+        self._write_line(sig + " {")
         self.indent_level += 1
 
         # Function body: we need a new scope for variables
@@ -135,34 +154,45 @@ class GoGenerator:
 
         self.indent_level -= 1
         self._write_line("}")
+        self.output_lines.append("")
 
     def _generate_class(self, cls: Dict[str, Any]):
         name = cls['name']
         self._write_line(f"type {name} struct {{")
         self.indent_level += 1
-        # Determine fields from __init__ method? Or look for assignments to self.xxx in body.
-        # For now, we'll just output a comment and maybe parse assignments to self.
-        # We'll scan body for assignments where target is attribute of self.
+        # Scan all methods (especially __init__) for assignments to self.attr
+        fields = {}  # field_name -> go_type
         for stmt in cls.get('body', []):
-            if stmt.get('type') == 'assign':
-                targets = stmt['targets']
-                # Check if target is attribute with value 'self' or 'this'? In Python it's self.
-                if len(targets) == 1:
-                    t = targets[0]
-                    if t.get('type') == 'attribute' and t['value'].get('type') == 'name' and t['value']['id'] == 'self':
-                        field_name = t['attr']
-                        value_type = self._infer_type_from_expr(stmt['value'])
-                        self._write_line(f"{field_name} {value_type}")
+            self._collect_self_fields(stmt, fields)
+        for field_name, field_type in fields.items():
+            self._write_line(f"{field_name} {field_type}")
         self.indent_level -= 1
         self._write_line("}")
 
         # Methods inside class
         for stmt in cls.get('body', []):
             if stmt.get('type') == 'function':
-                # Method has a receiver? We need to handle self parameter.
-                # In Python, method first arg is self. We'll convert to Go method with pointer receiver if methods modify.
-                # Simplify: use value receiver.
                 self._generate_method(stmt, cls_name=name)
+
+    def _collect_self_fields(self, node: Dict[str, Any], fields: Dict[str, str]):
+        """Recursively scan for self.attr assignments to discover struct fields."""
+        if node.get('type') == 'assign':
+            targets = node.get('targets', [])
+            if len(targets) == 1:
+                t = targets[0]
+                if (t.get('type') == 'attribute'
+                        and t.get('value', {}).get('type') == 'name'
+                        and t['value']['id'] == 'self'):
+                    field_name = t['attr']
+                    if field_name not in fields:
+                        fields[field_name] = self._infer_type_from_expr(node['value'])
+        # Recurse into function bodies, if/for/while bodies, etc.
+        for key in ('body', 'orelse'):
+            sub = node.get(key, [])
+            if isinstance(sub, list):
+                for child in sub:
+                    if isinstance(child, dict):
+                        self._collect_self_fields(child, fields)
 
     def _generate_method(self, func: Dict[str, Any], cls_name: str):
         # func is like a regular function but first argument is self; we'll drop it and make it a method.
@@ -183,17 +213,19 @@ class GoGenerator:
         if returns:
             ret_type = self._expr_to_go_type(returns)
             sig += " " + ret_type
-        self._write_line(sig)
-        self._write_line("{")
+        self._write_line(sig + " {")
         self.indent_level += 1
         saved_vars = self.known_vars.copy()
+        saved_in_method = self.in_method
         self.known_vars = {}
-        # In method, we have c receiver; we might need to handle self -> c.
+        self.in_method = True
         for stmt in func.get('body', []):
             self._generate_stmt(stmt)
         self.known_vars = saved_vars
+        self.in_method = saved_in_method
         self.indent_level -= 1
         self._write_line("}")
+        self.output_lines.append("")
 
     def _generate_assign(self, assign: Dict[str, Any]):
         # Multiple targets allowed in Python. We'll handle one target for simplicity.
@@ -245,12 +277,29 @@ class GoGenerator:
         for stmt in if_stmt.get('body', []):
             self._generate_stmt(stmt)
         self.indent_level -= 1
-        if if_stmt.get('orelse'):
-            self._write_line("} else {")
-            self.indent_level += 1
-            for stmt in if_stmt['orelse']:
-                self._generate_stmt(stmt)
-            self.indent_level -= 1
+        orelse = if_stmt.get('orelse', [])
+        if orelse:
+            if len(orelse) == 1 and orelse[0].get('type') == 'if':
+                # elif -> else if
+                elif_test = self._expr(orelse[0]['test'])
+                self._write_line(f"}} else if {elif_test} {{")
+                self.indent_level += 1
+                for stmt in orelse[0].get('body', []):
+                    self._generate_stmt(stmt)
+                self.indent_level -= 1
+                inner_orelse = orelse[0].get('orelse', [])
+                if inner_orelse:
+                    self._write_line("} else {")
+                    self.indent_level += 1
+                    for stmt in inner_orelse:
+                        self._generate_stmt(stmt)
+                    self.indent_level -= 1
+            else:
+                self._write_line("} else {")
+                self.indent_level += 1
+                for stmt in orelse:
+                    self._generate_stmt(stmt)
+                self.indent_level -= 1
         self._write_line("}")
 
     def _generate_for(self, for_stmt: Dict[str, Any]):
@@ -300,7 +349,10 @@ class GoGenerator:
 
     def _generate_while(self, while_stmt: Dict[str, Any]):
         test = self._expr(while_stmt['test'])
-        self._write_line(f"while {test} {{")
+        if test == "true":
+            self._write_line("for {")
+        else:
+            self._write_line(f"for {test} {{")
         self.indent_level += 1
         for stmt in while_stmt.get('body', []):
             self._generate_stmt(stmt)
@@ -324,7 +376,12 @@ class GoGenerator:
     def _generate_raise(self, raise_stmt: Dict[str, Any]):
         exc = raise_stmt.get('exc')
         if exc:
-            self._write_line(f"panic({self._expr(exc)})")
+            # If exc is a call like Exception("msg") or RuntimeError("msg"),
+            # extract the message argument for panic
+            if exc.get('type') == 'call' and exc.get('args'):
+                self._write_line(f"panic({self._expr(exc['args'][0])})")
+            else:
+                self._write_line(f"panic({self._expr(exc)})")
         else:
             self._write_line("panic(\"error\")")
 
@@ -338,10 +395,12 @@ class GoGenerator:
     def _generate_assert(self, assert_stmt: Dict[str, Any]):
         test = self._expr(assert_stmt['test'])
         msg = assert_stmt.get('msg')
-        if msg:
-            self._write_line(f"if !{test} {{ panic({self._expr(msg)}) }}")
-        else:
-            self._write_line(f"if !{test} {{ panic(\"assertion failed\") }}")
+        panic_arg = self._expr(msg) if msg else '"assertion failed"'
+        self._write_line(f"if !({test}) {{")
+        self.indent_level += 1
+        self._write_line(f"panic({panic_arg})")
+        self.indent_level -= 1
+        self._write_line("}")
 
     def _expr(self, expr: Dict[str, Any]) -> str:
         """Convert expression IR to Go code."""
@@ -349,7 +408,16 @@ class GoGenerator:
             return ""
         etype = expr.get('type')
         if etype == 'name':
-            return expr['id']
+            name = expr['id']
+            if name == 'self' and self.in_method:
+                return 'c'
+            if name == 'True':
+                return 'true'
+            if name == 'False':
+                return 'false'
+            if name == 'None':
+                return 'nil'
+            return name
         if etype == 'constant':
             val = expr['value']
             if val is None:
@@ -462,8 +530,68 @@ class GoGenerator:
         return f"/* unknown expr: {etype} */"
 
     def _infer_type_from_expr(self, expr: Dict[str, Any]) -> str:
-        # Use type_mapper
-        return infer_type(expr) or "interface{}"
+        """Infer Go type from an IR expression dict."""
+        if not expr:
+            return "interface{}"
+        etype = expr.get('type')
+        if etype == 'constant':
+            val = expr['value']
+            if val is None:
+                return "interface{}"
+            if isinstance(val, bool):
+                return "bool"
+            if isinstance(val, int):
+                return "int"
+            if isinstance(val, float):
+                return "float64"
+            if isinstance(val, str):
+                return "string"
+            if isinstance(val, bytes):
+                return "[]byte"
+            return "interface{}"
+        if etype == 'name':
+            name = expr['id']
+            if name in ('True', 'False'):
+                return "bool"
+            if name in ('None',):
+                return "interface{}"
+            return self.known_vars.get(name, "interface{}")
+        if etype == 'list':
+            elts = expr.get('elts', [])
+            if elts:
+                first_type = self._infer_type_from_expr(elts[0])
+                if first_type and all(self._infer_type_from_expr(e) == first_type for e in elts):
+                    return f"[]{first_type}"
+            return "[]interface{}"
+        if etype == 'dict':
+            keys = expr.get('keys', [])
+            values = expr.get('values', [])
+            if keys and values:
+                kt = self._infer_type_from_expr(keys[0])
+                vt = self._infer_type_from_expr(values[0])
+                if kt and vt:
+                    return f"map[{kt}]{vt}"
+            return "map[string]interface{}"
+        if etype == 'binop':
+            lt = self._infer_type_from_expr(expr.get('left'))
+            rt = self._infer_type_from_expr(expr.get('right'))
+            if lt == rt:
+                return lt
+            return lt or "interface{}"
+        if etype == 'compare':
+            return "bool"
+        if etype == 'boolop':
+            return "bool"
+        if etype == 'unaryop':
+            if expr.get('op') == 'Not':
+                return "bool"
+            return self._infer_type_from_expr(expr.get('operand'))
+        if etype == 'call':
+            func = expr.get('func', {})
+            if func.get('type') == 'name' and func.get('id') == 'len':
+                return "int"
+            return "interface{}"
+        return "interface{}"
 
     def _expr_to_go_type(self, expr: Dict[str, Any]) -> str:
         # If expr is a name (like 'int'), return mapped Go type

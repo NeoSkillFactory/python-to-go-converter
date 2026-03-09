@@ -18,10 +18,10 @@
 
 ```bash
 # Convert a single file
-python-to-go-converter convert examples/basic.py --output output.go
+python3 scripts/converter.py convert input.py --output output.go
 
 # Convert with diagnostics
-python-to-go-converter convert myscript.py --verbose
+python3 scripts/converter.py convert myscript.py --verbose
 ```
 
 ## Quick Start

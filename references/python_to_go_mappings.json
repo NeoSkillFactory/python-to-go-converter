@@ -23,7 +23,9 @@
     "GtE": ">=",
     "And": "&&",
     "Or": "||",
-    "Not": "!"
+    "Not": "!",
+    "USub": "-",
+    "UAdd": "+"
   },
   "functions": {
     "print": "fmt.Println",

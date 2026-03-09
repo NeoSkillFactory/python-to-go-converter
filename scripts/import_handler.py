@@ -9,7 +9,7 @@ Usage:
 
 import json
 import os
-from typing import Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 REFERENCES_DIR = os.path.join(os.path.dirname(__file__), '..', 'references')
 STDLIB_EQUIV_PATH = os.path.join(REFERENCES_DIR, 'stdlib_equivalents.json')

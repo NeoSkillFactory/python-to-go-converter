@@ -28,7 +28,7 @@ The skill is installed as part of an OpenClaw skill package. Ensure dependencies
 ### CLI Invocation
 
 ```bash
-python-to-go-converter convert <input.py> [--output <output.go>]
+python3 scripts/converter.py convert <input.py> [--output <output.go>] [--verbose] [--check]
 ```
 
 ### Agent Integration
@@ -39,10 +39,10 @@ The skill exposes a single-turn execution model. Provide Python code as input, r
 
 ```bash
 # Convert a single file
-python-to-go-converter convert examples/basic.py --output output.go
+python3 scripts/converter.py convert input.py --output output.go
 
 # Convert with diagnostics
-python-to-go-converter convert myscript.py --verbose
+python3 scripts/converter.py convert myscript.py --verbose
 ```
 
 ## Error Handling
@@ -64,7 +64,7 @@ See `error_codes.json` for the full error catalog.
 - `references/python_to_go_mappings.json` — Feature mapping table
 - `references/stdlib_equivalents.json` — Standard library translations
 - `references/error_codes.json` — Error code definitions
-- `examples/` — Example conversions and test cases
+- `assets/` — Example Python and Go conversion pairs
 - `tests/` — Unit tests and validation suite
 
 ## Limitations
