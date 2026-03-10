@@ -33,8 +33,6 @@ The skill is installed as part of an OpenClaw skill package. Ensure dependencies
 
 Source code: [github.com/NeoSkillFactory/python-to-go-converter](https://github.com/NeoSkillFactory/python-to-go-converter)
 
-**Price suggestion:** $29 USD
-
 ## License
 
 MIT © NeoSkillFactory
